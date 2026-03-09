@@ -41,16 +41,7 @@ Telemetry typically includes:
 
 Telemetry Flow:
 
-Application / Infrastructure
-        ↓
-Instrumentation / Telemetry Generation
-        ↓
-Agent / Collector
-        ↓
-Observability Platform
-        ↓
-Dashboards / Alerts / Analysis
----
+![alt text](telemetry.png)
 
 # 3. Types of Telemetry Data
 
