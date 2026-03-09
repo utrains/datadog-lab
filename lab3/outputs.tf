@@ -22,10 +22,10 @@ output "frontend_url" {
   value = "http://${aws_instance.lab.public_ip}"
 }
 
-output "vpc_id" {
-  value = aws_vpc.lab.id
-}
+# output "vpc_id" {
+#   value = aws_vpc.lab.id
+# }
 
-output "public_subnet_id" {
-  value = aws_subnet.public.id
-}
+# output "public_subnet_id" {
+#   value = aws_subnet.public.id
+# }

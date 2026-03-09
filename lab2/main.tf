@@ -32,7 +32,7 @@ locals {
   }
 }
 
-data "aws_vpc" "selected" {
+data "aws_vpc" "datadog-vpc" {
   filter {
     name   = "tag:Name"
     values = ["${var.vpc_name}"]
@@ -42,15 +42,14 @@ data "aws_vpc" "selected" {
 data "aws_subnets" "selected" {
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.selected.id]
+    values = [data.aws_vpc.datadog-vpc.id]
   }
 }
-
 
 resource "aws_security_group" "lab" {
   name        = "${var.name_prefix}-${local.lab_name}-sg"
   description = "Security group for ${local.lab_name}"
-  vpc_id      = data.aws_vpc.selected.id
+  vpc_id      = data.aws_vpc.datadog-vpc.id
 
   ingress {
     description = "SSH"
