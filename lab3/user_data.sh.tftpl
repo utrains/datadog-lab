@@ -1,0 +1,239 @@
+#!/bin/bash
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y docker.io docker-compose curl git jq stress
+systemctl enable docker
+systemctl start docker
+usermod -aG docker ubuntu || true
+mkdir -p /opt/datadog-lab3/frontend /opt/datadog-lab3/orders /opt/datadog-lab3/payments
+cd /opt/datadog-lab3
+
+cat > /opt/datadog-lab3/frontend/app.py <<'PYEOF'
+from flask import Flask, jsonify
+import logging
+import os
+import requests
+from ddtrace import patch_all
+
+patch_all()
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+ORDERS_URL = os.getenv("ORDERS_URL", "http://orders:5001")
+
+@app.route("/")
+def home():
+    response = requests.get(f"{ORDERS_URL}/checkout", timeout=20)
+    app.logger.info("frontend completed checkout flow with status %s", response.status_code)
+    return jsonify({"frontend": "ok", "checkout": response.json()})
+
+@app.route("/slow")
+def slow():
+    response = requests.get(f"{ORDERS_URL}/checkout?mode=slow", timeout=25)
+    return jsonify({"frontend": "slow", "checkout": response.json()})
+
+@app.route("/error")
+def error():
+    response = requests.get(f"{ORDERS_URL}/checkout?mode=error", timeout=20)
+    return jsonify({"frontend": "error", "checkout": response.text, "status": response.status_code}), response.status_code
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
+PYEOF
+
+cat > /opt/datadog-lab3/frontend/Dockerfile <<'DOCKEREOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask ddtrace requests gunicorn
+ENV DD_SERVICE=lab3-frontend
+ENV DD_ENV=lab3
+ENV DD_VERSION=1.0.0
+CMD ["ddtrace-run", "gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "app:app"]
+DOCKEREOF
+
+cat > /opt/datadog-lab3/orders/app.py <<'PYEOF'
+from flask import Flask, jsonify, request
+import logging
+import os
+import random
+import requests
+import redis
+from ddtrace import patch_all
+
+patch_all(redis=True)
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+PAYMENTS_URL = os.getenv("PAYMENTS_URL", "http://payments:5002")
+r = redis.Redis(host=os.getenv("REDIS_HOST", "redis"), port=6379, decode_responses=True)
+
+@app.route("/checkout")
+def checkout():
+    mode = request.args.get("mode", "normal")
+    order_id = r.incr("orders_seen")
+    app.logger.info("checkout started order_id=%s mode=%s", order_id, mode)
+    resp = requests.get(f"{PAYMENTS_URL}/charge?mode={mode}", timeout=20)
+    if mode == "error":
+        app.logger.error("forced checkout error order_id=%s", order_id)
+        return jsonify({"order_id": order_id, "status": "failed"}), 500
+    return jsonify({
+        "order_id": order_id,
+        "status": "completed",
+        "payment": resp.json(),
+        "cart_items": random.randint(1, 5)
+    })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001)
+PYEOF
+
+cat > /opt/datadog-lab3/orders/Dockerfile <<'DOCKEREOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask ddtrace requests redis gunicorn
+ENV DD_SERVICE=lab3-orders
+ENV DD_ENV=lab3
+ENV DD_VERSION=1.0.0
+CMD ["ddtrace-run", "gunicorn", "-w", "2", "-b", "0.0.0.0:5001", "app:app"]
+DOCKEREOF
+
+cat > /opt/datadog-lab3/payments/app.py <<'PYEOF'
+from flask import Flask, jsonify, request
+import logging
+import random
+import time
+from ddtrace import patch_all
+
+patch_all()
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+
+@app.route("/charge")
+def charge():
+    mode = request.args.get("mode", "normal")
+    if mode == "slow":
+        delay = round(random.uniform(2.5, 6.0), 2)
+        app.logger.warning("slow payment path delay=%.2f", delay)
+        time.sleep(delay)
+    if mode == "error":
+        app.logger.error("payment service forced failure")
+        return jsonify({"payment_status": "failed", "reason": "forced failure"}), 500
+    return jsonify({"payment_status": "approved", "tx_id": random.randint(10000, 99999)})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5002)
+PYEOF
+
+cat > /opt/datadog-lab3/payments/Dockerfile <<'DOCKEREOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask ddtrace gunicorn
+ENV DD_SERVICE=lab3-payments
+ENV DD_ENV=lab3
+ENV DD_VERSION=1.0.0
+CMD ["ddtrace-run", "gunicorn", "-w", "2", "-b", "0.0.0.0:5002", "app:app"]
+DOCKEREOF
+
+cat > /opt/datadog-lab3/docker-compose.yml <<'YAMLEOF'
+version: "3.8"
+services:
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    container_name: datadog-agent
+    environment:
+      DD_API_KEY: "${datadog_api_key}"
+      DD_SITE: "datadoghq.com"
+      DD_APM_ENABLED: "true"
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "true"
+      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
+    ports:
+      - "127.0.0.1:8126:8126"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: lab3-redis
+    restart: unless-stopped
+
+  payments:
+    build: ./payments
+    container_name: lab3-payments
+    environment:
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126"
+      DD_SERVICE: "lab3-payments"
+      DD_ENV: "lab3"
+      DD_VERSION: "1.0.0"
+      DD_LOGS_INJECTION: "true"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - datadog-agent
+    restart: unless-stopped
+
+  orders:
+    build: ./orders
+    container_name: lab3-orders
+    environment:
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126"
+      DD_SERVICE: "lab3-orders"
+      DD_ENV: "lab3"
+      DD_VERSION: "1.0.0"
+      DD_LOGS_INJECTION: "true"
+      PYTHONUNBUFFERED: "1"
+      PAYMENTS_URL: "http://payments:5002"
+      REDIS_HOST: "redis"
+    ports:
+      - "5000:5001"
+    depends_on:
+      - datadog-agent
+      - payments
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: lab3-frontend
+    environment:
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126"
+      DD_SERVICE: "lab3-frontend"
+      DD_ENV: "lab3"
+      DD_VERSION: "1.0.0"
+      DD_LOGS_INJECTION: "true"
+      PYTHONUNBUFFERED: "1"
+      ORDERS_URL: "http://orders:5001"
+    ports:
+      - "80:8080"
+    depends_on:
+      - datadog-agent
+      - orders
+    restart: unless-stopped
+
+  loadgen:
+    image: curlimages/curl:8.8.0
+    container_name: lab3-loadgen
+    command: >
+      sh -c 'while true; do
+      curl -s http://frontend:8080/ > /dev/null || true;
+      if [ $$(($$RANDOM % 4)) -eq 0 ]; then curl -s http://frontend:8080/slow > /dev/null || true; fi;
+      if [ $$(($$RANDOM % 10)) -eq 0 ]; then curl -s http://frontend:8080/error > /dev/null || true; fi;
+      sleep 1;
+      done'
+    depends_on:
+      - frontend
+    restart: unless-stopped
+YAMLEOF
+
+cd /opt/datadog-lab3
+docker-compose up -d --build

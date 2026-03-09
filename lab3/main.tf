@@ -1,0 +1,152 @@
+provider "aws" {
+  region = var.aws_region
+}
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+locals {
+  lab_name = "lab3"
+
+  common_tags = {
+    Project     = "datadog-observability-lab"
+    ManagedBy   = "terraform"
+    Environment = "lab"
+    Lab         = local.lab_name
+  }
+}
+
+/*
+resource "aws_vpc" "lab" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}-vpc"
+  })
+}
+
+resource "aws_internet_gateway" "lab" {
+  vpc_id = aws_vpc.lab.id
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}-igw"
+  })
+}
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.lab.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}-public-subnet"
+    Tier = "public"
+  })
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.lab.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.lab.id
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}-public-rt"
+  })
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+*/
+
+data "aws_vpc" "selected" {
+  filter {
+    name   = "tag:Name"
+    values = ["my-existing-vpc"]
+  }
+}
+resource "aws_security_group" "lab" {
+  name        = "${var.name_prefix}-${local.lab_name}-sg"
+  description = "Security group for ${local.lab_name}"
+  vpc_id      = aws_vpc.lab.id
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_http_cidr]
+  }
+
+  ingress {
+    description = "App direct access"
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_http_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}-sg"
+  })
+}
+
+resource "aws_instance" "lab" {
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.lab.id]
+  associate_public_ip_address = true
+  key_name                    = var.key_name
+  user_data_replace_on_change = true
+  user_data                   = templatefile("${path.module}/user_data.sh.tftpl", {
+    datadog_api_key = var.datadog_api_key
+  })
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name_prefix}-${local.lab_name}"
+  })
+}

@@ -1,0 +1,193 @@
+#!/bin/bash
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y docker.io docker-compose curl git jq stress
+systemctl enable docker
+systemctl start docker
+usermod -aG docker ubuntu || true
+mkdir -p /opt/datadog-lab2/frontend /opt/datadog-lab2/api
+cd /opt/datadog-lab2
+
+cat > /opt/datadog-lab2/frontend/app.py <<'PYEOF'
+from flask import Flask, jsonify
+import logging
+import os
+import requests
+from ddtrace import patch_all, tracer
+
+patch_all()
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+API_URL = os.getenv("API_URL", "http://api:5000")
+
+@app.route("/")
+def home():
+    with tracer.trace("frontend.request"):
+        r = requests.get(f"{API_URL}/items", timeout=10)
+        data = r.json()
+        app.logger.info("frontend fetched items with status %s", r.status_code)
+        return jsonify({"frontend": "ok", "api": data})
+
+@app.route("/slow")
+def slow():
+    r = requests.get(f"{API_URL}/slow", timeout=15)
+    return jsonify({"frontend": "slow-path", "api": r.json()})
+
+@app.route("/error")
+def error():
+    r = requests.get(f"{API_URL}/error", timeout=10)
+    return jsonify({"frontend": "error-path", "api": r.text, "status": r.status_code}), r.status_code
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
+PYEOF
+
+cat > /opt/datadog-lab2/frontend/Dockerfile <<'DOCKEREOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask ddtrace requests gunicorn
+ENV DD_SERVICE=lab2-frontend
+ENV DD_ENV=lab2
+ENV DD_VERSION=1.0.0
+CMD ["ddtrace-run", "gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "app:app"]
+DOCKEREOF
+
+cat > /opt/datadog-lab2/api/app.py <<'PYEOF'
+from flask import Flask, jsonify
+import logging
+import os
+import random
+import time
+import redis
+from ddtrace import patch_all, tracer
+
+patch_all(redis=True)
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+r = redis.Redis(host=os.getenv("REDIS_HOST", "redis"), port=6379, decode_responses=True)
+
+@app.route("/items")
+def items():
+    with tracer.trace("api.items"):
+        if not r.get("visits"):
+            r.set("visits", 0)
+        visits = r.incr("visits")
+        delay = random.uniform(0.1, 0.9)
+        time.sleep(delay)
+        app.logger.info("items requested; visits=%s delay=%.2f", visits, delay)
+        return jsonify({"items": ["book", "laptop", "keyboard"], "visits": visits, "delay": round(delay, 2)})
+
+@app.route("/slow")
+def slow():
+    delay = random.uniform(2.0, 5.0)
+    app.logger.warning("slow endpoint triggered; delay=%.2f", delay)
+    time.sleep(delay)
+    return jsonify({"endpoint": "slow", "delay": round(delay, 2)})
+
+@app.route("/error")
+def error():
+    app.logger.error("intentional lab2 API failure")
+    return jsonify({"error": "intentional lab2 failure"}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+PYEOF
+
+cat > /opt/datadog-lab2/api/Dockerfile <<'DOCKEREOF'
+FROM python:3.11-slim
+WORKDIR /app
+COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask ddtrace requests redis gunicorn
+ENV DD_SERVICE=lab2-api
+ENV DD_ENV=lab2
+ENV DD_VERSION=1.0.0
+CMD ["ddtrace-run", "gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "app:app"]
+DOCKEREOF
+
+cat > /opt/datadog-lab2/docker-compose.yml <<'YAMLEOF'
+version: "3.8"
+services:
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    container_name: datadog-agent
+    environment:
+      DD_API_KEY: "${datadog_api_key}"
+      DD_SITE: "us5.datadoghq.com"
+      DD_APM_ENABLED: "true"
+      DD_HOSTNAME: dev2.utrains.org
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "true"
+      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
+    ports:
+      - "127.0.0.1:8126:8126"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: lab2-redis
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    container_name: lab2-api
+    environment:
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126"
+      DD_SERVICE: "lab2-api"
+      DD_ENV: "lab2"
+      DD_VERSION: "1.0.0"
+      DD_LOGS_INJECTION: "true"
+      PYTHONUNBUFFERED: "1"
+      REDIS_HOST: "redis"
+    ports:
+      - "5000:5000"
+    depends_on:
+      - datadog-agent
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: lab2-frontend
+    environment:
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126"
+      DD_SERVICE: "lab2-frontend"
+      DD_ENV: "lab2"
+      DD_VERSION: "1.0.0"
+      DD_LOGS_INJECTION: "true"
+      PYTHONUNBUFFERED: "1"
+      API_URL: "http://api:5000"
+    ports:
+      - "80:8080"
+    depends_on:
+      - datadog-agent
+      - api
+    restart: unless-stopped
+
+  loadgen:
+    image: curlimages/curl:8.8.0
+    container_name: lab2-loadgen
+    command: >
+      sh -c 'while true; do
+      curl -s http://frontend:8080/ > /dev/null || true;
+      if [ $$(($$RANDOM % 5)) -eq 0 ]; then curl -s http://frontend:8080/slow > /dev/null || true; fi;
+      if [ $$(($$RANDOM % 12)) -eq 0 ]; then curl -s http://frontend:8080/error > /dev/null || true; fi;
+      sleep 1;
+      done'
+    depends_on:
+      - frontend
+    restart: unless-stopped
+YAMLEOF
+
+cd /opt/datadog-lab2
+docker-compose up -d --build
