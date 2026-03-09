@@ -55,5 +55,5 @@ variable "public_subnet_cidr" {
 variable "vpc_name" {
   description = "Name tag of the existing VPC"
   type        = string
-  default     = "datadog-lab-vpc"
+  default     = "datadog-lab1-vpc"
 }

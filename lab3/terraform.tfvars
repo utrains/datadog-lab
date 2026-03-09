@@ -1,7 +1,7 @@
 aws_region        = "us-east-1"
 name_prefix       = "datadog-lab3"
 instance_type     = "t3.large"
-allowed_ssh_cidr  = "YOUR.PUBLIC.IP/32"
+allowed_ssh_cidr  = "0.0.0.0/0"
 allowed_http_cidr = "0.0.0.0/0"
 datadog_api_key   = "replace-me"
 
