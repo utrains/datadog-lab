@@ -32,19 +32,15 @@ locals {
   }
 }
 
-/*
-resource "aws_vpc" "lab" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-vpc"
-  })
+data "aws_vpc" "lab" {
+  filter {
+    name   = "tag:Name"
+    values = [var.existing_vpc_name]
+  }
 }
 
 resource "aws_internet_gateway" "lab" {
-  vpc_id = aws_vpc.lab.id
+  vpc_id = data.aws_vpc.lab.id
 
   tags = merge(local.common_tags, {
     Name = "${var.name_prefix}-${local.lab_name}-igw"
@@ -52,7 +48,7 @@ resource "aws_internet_gateway" "lab" {
 }
 
 resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.lab.id
+  vpc_id                  = data.aws_vpc.lab.id
   cidr_block              = var.public_subnet_cidr
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
@@ -64,7 +60,7 @@ resource "aws_subnet" "public" {
 }
 
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.lab.id
+  vpc_id = data.aws_vpc.lab.id
 
   route {
     cidr_block = "0.0.0.0/0"
@@ -80,18 +76,11 @@ resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
-*/
 
-data "aws_vpc" "selected" {
-  filter {
-    name   = "tag:Name"
-    values = ["my-existing-vpc"]
-  }
-}
 resource "aws_security_group" "lab" {
   name        = "${var.name_prefix}-${local.lab_name}-sg"
   description = "Security group for ${local.lab_name}"
-  vpc_id      = aws_vpc.lab.id
+  vpc_id      = data.aws_vpc.lab.id
 
   ingress {
     description = "SSH"

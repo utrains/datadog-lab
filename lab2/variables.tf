@@ -51,3 +51,9 @@ variable "public_subnet_cidr" {
   type        = string
   default     = "10.99.1.0/24"
 }
+
+variable "vpc_name" {
+  description = "Name tag of the existing VPC"
+  type        = string
+  default     = "10.99.1.0/24"
+}

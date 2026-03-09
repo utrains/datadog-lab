@@ -38,7 +38,7 @@ resource "aws_vpc" "lab" {
   enable_dns_hostnames = true
 
   tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-vpc"
+    Name = "${var.name_prefix}-vpc"
   })
 }
 
@@ -46,7 +46,7 @@ resource "aws_internet_gateway" "lab" {
   vpc_id = aws_vpc.lab.id
 
   tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-igw"
+    Name = "${var.name_prefix}-igw"
   })
 }
 
@@ -57,7 +57,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-public-subnet"
+    Name = "${var.name_prefix}-public-subnet"
     Tier = "public"
   })
 }
@@ -71,7 +71,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-public-rt"
+    Name = "${var.name_prefix}-public-rt"
   })
 }
 

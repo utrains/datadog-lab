@@ -32,58 +32,25 @@ locals {
   }
 }
 
-resource "aws_vpc" "lab" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-vpc"
-  })
-}
-
-resource "aws_internet_gateway" "lab" {
-  vpc_id = aws_vpc.lab.id
-
-  tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-igw"
-  })
-}
-
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.lab.id
-  cidr_block              = var.public_subnet_cidr
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
-
-  tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-public-subnet"
-    Tier = "public"
-  })
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.lab.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.lab.id
+data "aws_vpc" "selected" {
+  filter {
+    name   = "tag:Name"
+    values = ["${var.vpc_name}"]
   }
-
-  tags = merge(local.common_tags, {
-    Name = "${var.name_prefix}-${local.lab_name}-public-rt"
-  })
 }
 
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
+data "aws_subnets" "selected" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.selected.id]
+  }
 }
+
 
 resource "aws_security_group" "lab" {
   name        = "${var.name_prefix}-${local.lab_name}-sg"
   description = "Security group for ${local.lab_name}"
-  vpc_id      = aws_vpc.lab.id
+  vpc_id      = data.aws_vpc.selected.id
 
   ingress {
     description = "SSH"
@@ -124,7 +91,7 @@ resource "aws_security_group" "lab" {
 resource "aws_instance" "lab" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = data.aws_subnets.selected.ids[0]
   vpc_security_group_ids      = [aws_security_group.lab.id]
   associate_public_ip_address = true
   key_name                    = var.key_name
